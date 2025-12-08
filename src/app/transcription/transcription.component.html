@@ -1,0 +1,38 @@
+<div class="container">
+  <h1>WebSocket Connection Manager</h1>
+  
+  <div class="controls">
+    <button 
+      class="btn btn-connect" 
+      (click)="connect()"
+      [disabled]="isConnected() || isConnecting()">
+      Connect
+    </button>
+    
+    <button 
+      class="btn btn-disconnect" 
+      (click)="disconnect()"
+      [disabled]="!isConnected() && !isConnecting()">
+      Disconnect
+    </button>
+  </div>
+
+  <div class="status-container">
+    <div class="status-item">
+      <label>Network Status:</label>
+      <div class="status-indicator" [ngClass]="getNetworkStatusClass()">
+        <span class="status-dot"></span>
+        <span class="status-text">{{ getNetworkStatusText() }}</span>
+      </div>
+    </div>
+
+    <div class="status-item">
+      <label>AWS Status:</label>
+      <div class="status-indicator status-aws">
+        <span class="status-dot"></span>
+        <span class="status-text">{{ awsStatus }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
