@@ -6,6 +6,12 @@
 
 const WebSocket = require('ws');
 const readline = require('readline');
+const path = require('path');
+const fs = require('fs');
+const AudioRecorder = require('./audioRecorder');
+
+// Load audio config
+const audioConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'audio-config.json'), 'utf8'));
 
 // Configuration
 const PORT = 5000;
@@ -19,6 +25,10 @@ let clientCount = 0;
 let totalPacketsReceived = 0;
 let totalBytesReceived = 0;
 let startTime = null;
+
+// Audio recorder instance
+const audioRecorder = new AudioRecorder();
+
 
 /**
  * Start the WebSocket server
@@ -58,26 +68,66 @@ function startServer() {
                     // Check if message is JSON (text) or binary
                     let packet;
                     
-                    if (data instanceof Buffer) {
+                    //if (data instanceof Buffer) {
                         // Binary data received
-                        console.log(`[Client ${clientId}] Received binary data: ${data.length} bytes`);
+                    //    console.log(`[Client ${clientId}] Received binary data: ${data.length} bytes`);
                         // For now, just log it - you can process binary audio data here
-                        return;
-                    }
+                    //    return;
+                    //}
                     
                     // Try to parse as JSON
                     try {
-                        packet = JSON.parse(data.toString());
-                    } catch (e) {
-                        console.log(`[Client ${clientId}] Received non-JSON text message:`, data.toString());
+                        packet = JSON.parse(data.toString('utf8'));
+                        
+                    } catch (parseError) {
+                        // Not valid JSON - might be binary data
+                        console.log(`[Client ${clientId}] Received non-JSON message: ${data.length} bytes`);
                         return;
                     }
 
-                    // Handle audio packet
-                    if (packet.data && Array.isArray(packet.data)) {
+                    // Handle AudioEvent packets (from audio.service.ts)
+                    if (packet.headers && packet.headers[':event-type'] === 'AudioEvent') {
+                        // Extract audio format from content-type header
+                      
+                        const contentType = packet.headers[':content-type'] || '';
+                        const sampleRateMatch = contentType.match(/rate=(\d+)/);
+                        const channelsMatch = contentType.match(/channels=(\d+)/);
+                        
+                        const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1]) : audioConfig.sampleRate;
+                        const channels = channelsMatch ? parseInt(channelsMatch[1]) : audioConfig.channels;
+                        const bitDepth = audioConfig.bitDepth;
+                        
+                        // Decode base64 payload to get PCM audio data
+                        if (!packet.payload) {
+                            console.log(`[Client ${clientId}] AudioEvent received but no payload`);
+                            return;
+                        }
+                        
+                        const audioBuffer = Buffer.from(packet.payload, 'base64');
+                        
+                        // Convert Buffer to array of 16-bit signed integers (PCM samples)
+                        const samples = [];
+                        for (let i = 0; i < audioBuffer.length; i += 2) {
+                            if (i + 1 < audioBuffer.length) {
+                                samples.push(audioBuffer.readInt16LE(i));
+                            }
+                        }
+                        
+                        // Create packet in format expected by audioRecorder
+                        const audioPacket = {
+                            data: samples,
+                            sampleRate: sampleRate,
+                            channels: channels,
+                            bitDepth: bitDepth,
+                            timestamp: Date.now(),
+                            dataLength: samples.length,
+                            duration: (samples.length / sampleRate) * 1000 // milliseconds
+                        };
+                        
+                        // Update statistics
                         packetCount++;
                         totalPacketsReceived++;
-                        const packetSize = packet.data.length * 2; // 16-bit = 2 bytes per sample
+                        const packetSize = audioBuffer.length;
                         totalBytes += packetSize;
                         totalBytesReceived += packetSize;
                         
@@ -85,39 +135,23 @@ function startServer() {
                             firstPacketTime = Date.now();
                         }
                         lastPacketTime = Date.now();
-
-                        // Log packet info (you can modify this to process/store the data)
-                        console.log(`[Client ${clientId}] Audio packet #${packetCount}:`, {
-                            timestamp: new Date(packet.timestamp).toISOString(),
-                            sampleRate: packet.sampleRate,
-                            channels: packet.channels,
-                            format: packet.format,
-                            bitDepth: packet.bitDepth,
-                            samples: packet.dataLength,
-                            duration: `${packet.duration.toFixed(2)}ms`,
-                            size: `${(packetSize / 1024).toFixed(2)} KB`,
-                            totalPackets: packetCount,
-                            totalData: `${(totalBytes / 1024 / 1024).toFixed(2)} MB`
-                        });
-
-                        // For now, we're just throwing away the data (not storing it)
-                        // You can add processing logic here:
-                        // - Save to file
-                        // - Process audio
-                        // - Send to transcription service
-                        // - etc.
+                        //console.log(packetCount);
+                        // Write to recording file if recording is active
+                        audioRecorder.writeAudioPacket(audioPacket);
                         
-                        // Example: Log first few samples for debugging
-                        if (packetCount <= 3) {
-                            console.log(`[Client ${clientId}] First ${Math.min(10, packet.data.length)} samples:`, 
-                                packet.data.slice(0, 10));
-                        }
-                    } else if (packet.type === 'audio_header') {
-                        // Handle binary audio header (if using sendAudioPacketBinary)
-                        console.log(`[Client ${clientId}] Received audio header:`, packet);
-                    } else {
-                        // Other message types
-                        console.log(`[Client ${clientId}] Received message:`, packet);
+                        // Log packet info (optional, for debugging)
+                        /*if (packetCount <= 3) {
+                            console.log(`[Client ${clientId}] AudioEvent packet #${packetCount}:`, {
+                                samples: samples.length,
+                                sampleRate: sampleRate,
+                                channels: channels,
+                                size: `${(packetSize / 1024).toFixed(2)} KB`,
+                                duration: `${audioPacket.duration.toFixed(2)}ms`,
+                                recording: audioRecorder.isRecording ? '●' : '-'
+                            });
+                        }*/
+                        
+                        return;
                     }
 
                 } catch (error) {
@@ -138,6 +172,7 @@ function startServer() {
                     totalData: `${(totalBytes / 1024 / 1024).toFixed(2)} MB`,
                     duration: `${duration}s`
                 });
+                audioRecorder.stopRecording();
             });
 
             // Handle errors
@@ -171,10 +206,16 @@ function startServer() {
 /**
  * Stop the WebSocket server
  */
-function stopServer() {
+async function stopServer() {
     if (!isRunning) {
         console.log('Server is not running!');
         return;
+    }
+
+    // Stop recording if in progress
+    if (audioRecorder.isRecording) {
+        console.log('Stopping active recording...');
+        await audioRecorder.stopRecording();
     }
 
     return new Promise((resolve) => {
@@ -233,6 +274,11 @@ function showStatus() {
     console.log(`Total Clients (all time): ${clientCount}`);
     console.log(`Total Packets Received: ${totalPacketsReceived}`);
     console.log(`Total Data Received: ${(totalBytesReceived / 1024 / 1024).toFixed(2)} MB`);
+    const recordingStatus = audioRecorder.getStatus();
+    console.log(`Recording: ${recordingStatus.isRecording ? `ACTIVE (${recordingStatus.recordingPackets} packets, ${(recordingStatus.recordingBytes / 1024).toFixed(2)} KB)` : 'INACTIVE'}`);
+    if (recordingStatus.isRecording && recordingStatus.recordingFile) {
+        console.log(`Recording File: ${path.basename(recordingStatus.recordingFile)}`);
+    }
     console.log('====================\n');
 }
 
@@ -241,12 +287,14 @@ function showStatus() {
  */
 function showHelp() {
     console.log('\n=== Available Commands ===');
-    console.log('start     - Start the WebSocket server');
-    console.log('stop      - Stop the WebSocket server');
-    console.log('restart   - Restart the WebSocket server');
-    console.log('status    - Show server status and statistics');
-    console.log('help      - Show this help message');
-    console.log('exit/quit - Exit the application');
+    console.log('start         - Start the WebSocket server');
+    console.log('stop          - Stop the WebSocket server');
+    console.log('restart       - Restart the WebSocket server');
+    console.log('status        - Show server status and statistics');
+    console.log('startrecording - Start recording incoming audio to WAV file');
+    console.log('stoprecording  - Stop recording and save WAV file');
+    console.log('help          - Show this help message');
+    console.log('exit/quit     - Exit the application');
     console.log('==========================\n');
 }
 
@@ -278,6 +326,12 @@ function setupConsoleInterface() {
             case 'status':
                 showStatus();
                 break;
+            case 'startrecording':
+                audioRecorder.startRecording(isRunning);
+                break;
+            case 'stoprecording':
+                await audioRecorder.stopRecording();
+                break;
             case 'help':
                 showHelp();
                 break;
@@ -301,6 +355,7 @@ function setupConsoleInterface() {
     });
 
     rl.on('close', () => {
+        audioRecorder.stopRecording();
         console.log('\nGoodbye!');
         process.exit(0);
     });
@@ -310,7 +365,10 @@ function setupConsoleInterface() {
 process.on('SIGINT', async () => {
     console.log('\n\nReceived interrupt signal...');
     if (isRunning) {
-        await stopServer();
+        await stopServer(); // stopServer now handles stopping recording
+    } else if (audioRecorder.isRecording) {
+        // If server not running but recording is active, stop it
+        await audioRecorder.stopRecording();
     }
     process.exit(0);
 });

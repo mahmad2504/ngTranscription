@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 import { BehaviorSubject, Observable } from 'rxjs';
 import { WebSocketService } from './websocket.service';
+import audioConfig from '../../audio-config.json';
 
 export interface AudioPacket {
   headers: {
@@ -21,9 +22,9 @@ export class AudioService {
   private source: MediaStreamAudioSourceNode | null = null;
   private isRecording = false;
 
-  private readonly sampleRate = 16000; // AWS Medical Transcription requires 16kHz
-  private readonly channels = 1; // Mono
-  private readonly bitsPerSample = 16;
+  private readonly sampleRate = audioConfig.sampleRate;
+  private readonly channels = audioConfig.channels;
+  private readonly bitsPerSample = audioConfig.bitDepth;
 
   constructor(private wsService: WebSocketService) {}
 
